@@ -348,10 +348,12 @@ def der_CJCKD7(n, ista, dn_dgamma, no1, ndoc, nalpha, nbeta, nv, nbf5, ndns, ncw
 
 # CJCKD8
 @njit(parallel=True, cache=True)
-def CJCKD8(n, no1, ndoc, nsoc, nbeta, nalpha, ndns, ncwo, MSpin):
-    """GNOF coefficients C^J and C^K that multiply J and K integrals"""
+def CJCKD8(n, no1, ndoc, nsoc, nbeta, nalpha, ndns, ncwo, MSpin, h_cut):
+    """GNOF coefficients C^J and C^K that multiply J and K integrals.
 
-    h_cut = 0.02 * np.sqrt(2.0)
+    h_cut: anchura del agujero dinamico (SOLUCION 3, antes fija a
+    0.02*sqrt(2)).  Ver parameters.py:gnof_hcut."""
+
     n_d = np.zeros((len(n)))
 
     for i in prange(ndoc):
@@ -423,9 +425,8 @@ def CJCKD8(n, no1, ndoc, nsoc, nbeta, nalpha, ndns, ncwo, MSpin):
 
 
 @njit(parallel=True, cache=True)
-def der_CJCKD8(n, dn_dgamma, no1, ndoc, nalpha, nbeta, nv, nbf5, ndns, ncwo, MSpin, nsoc):
+def der_CJCKD8(n, dn_dgamma, no1, ndoc, nalpha, nbeta, nv, nbf5, ndns, ncwo, MSpin, nsoc, h_cut):
 
-    h_cut = 0.02 * np.sqrt(2.0)
     n_d = np.zeros((len(n)))
     dn_d_dgamma = np.zeros((len(n), nv))
     dn_d12_dgamma = np.zeros((len(n), nv))
@@ -600,7 +601,7 @@ def compute_2RDM(pp, n):
 
         if pp.ipnof == 8:
 
-            h_cut = 0.02 * np.sqrt(2.0)
+            h_cut = getattr(pp, "gnof_hcut", 0.02 * np.sqrt(2.0))   # SOLUCION 3
             n_d = np.zeros((len(n)))
 
             for i in prange(pp.ndoc):
@@ -662,7 +663,8 @@ def PNOFi_selector(n, p):
     if p.ipnof == 7:
         cj12, ck12 = CJCKD7(n, p.ista, p.no1, p.ndoc, p.nsoc, p.nbeta, p.nalpha, p.ndns, p.ncwo, p.MSpin)
     if p.ipnof == 8:
-        cj12, ck12 = CJCKD8(n, p.no1, p.ndoc, p.nsoc, p.nbeta, p.nalpha, p.ndns, p.ncwo, p.MSpin)
+        cj12, ck12 = CJCKD8(n, p.no1, p.ndoc, p.nsoc, p.nbeta, p.nalpha, p.ndns, p.ncwo, p.MSpin,
+                            getattr(p, "gnof_hcut", 0.02 * np.sqrt(2.0)))
 
     return cj12, ck12
 
@@ -682,7 +684,8 @@ def der_PNOFi_selector(n, dn_dgamma, p):
         )
     if p.ipnof == 8:
         Dcj12r, Dck12r = der_CJCKD8(
-            n, dn_dgamma, p.no1, p.ndoc, p.nalpha, p.nbeta, p.nv, p.nbf5, p.ndns, p.ncwo, p.MSpin, p.nsoc
+            n, dn_dgamma, p.no1, p.ndoc, p.nalpha, p.nbeta, p.nv, p.nbf5, p.ndns, p.ncwo, p.MSpin, p.nsoc,
+            getattr(p, "gnof_hcut", 0.02 * np.sqrt(2.0))
         )
 
     return Dcj12r, Dck12r

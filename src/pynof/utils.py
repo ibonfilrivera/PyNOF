@@ -704,3 +704,59 @@ def compute_gammas_ebi(ndoc, nbf):
         gamma[i] = sp.special.erfinv(2 * val / nv - 1)
 
     return gamma
+
+
+# ============================================================
+# Lambda-ortogonalizacion incremental para uso en solvers tipo Davidson
+# con una metrica S grande (p. ej. ApB o AmB en ERPA0), evitando llamar
+# a eigh(S) por completo en cada iteracion (ver orthonormalize()).
+#
+# En vez de eso, se mantiene una cache LVk = S @ Vk que solo se
+# actualiza con las columnas NUEVAS de cada iteracion (costo
+# O(dd^2 * k_nuevo)), y la ortonormalizacion se resuelve en el espacio
+# reducido k x k via descomposicion de Cholesky.
+# ============================================================
+
+def _lambda_ortho_bloque(b_hat, S_b_hat):
+    """b_hat: (dd,k); S_b_hat = S @ b_hat ya calculado (evita recalcular).
+    M = b_hat^T S b_hat (k x k, SPD). Cholesky M=LL^T; b_new(L^T)=b_hat."""
+    from scipy.linalg import cholesky, solve_triangular
+    M = b_hat.T @ S_b_hat
+    M = 0.5 * (M + M.T)
+    L = cholesky(M, lower=True)
+    b_new = solve_triangular(L, b_hat.T, lower=True).T
+    Sb_new = solve_triangular(L, S_b_hat.T, lower=True).T
+    return b_new, Sb_new
+
+
+def inicializar_lambda_ortho(B0, S_operador):
+    """B0: (dd,k) vectores guia iniciales. S_operador: dd x dd (ApB o AmB).
+    Devuelve (V, LV) con V^T S V = I y LV = S @ V (cache para uso futuro)."""
+    Q, R = np.linalg.qr(B0)
+    keep = np.abs(np.diag(R)) > 1e-10
+    Bh = Q[:, keep]
+    Sh = S_operador @ Bh
+    return _lambda_ortho_bloque(Bh, Sh)
+
+
+def expandir_lambda_ortho(Bt_new, Vk, LVk, S_operador):
+    """Vk: base actual (dd,m), ya S-ortonormal (Vk^T S Vk = I).
+    LVk = S @ Vk (cache, dd x m). Bt_new: candidatos nuevos (dd,k_nuevo).
+    Devuelve Vk, LVk con las columnas nuevas anadidas al final."""
+    Bh = Bt_new.copy()
+    for _ in range(2):
+        # proyeccion en la metrica S: usa LVk (=S@Vk), NO Vk, como coeficiente
+        Bh -= Vk @ (LVk.T @ Bh)
+    Q, R = np.linalg.qr(Bh)
+    rdiag = np.abs(np.diag(R))
+    # umbral RELATIVO: descarta direcciones a nivel de ruido (casi
+    # linealmente dependientes del subespacio actual). Un umbral absoluto
+    # 1e-10 dejaba pasar columnas de ruido que, tras el Cholesky de
+    # _lambda_ortho_bloque, inyectaban vectores de norma enorme.
+    keep = rdiag > 1e-8 * max(rdiag.max(initial=0.0), 1.0)
+    Bh = Q[:, keep]
+    if Bh.shape[1] == 0:
+        return Vk, LVk  # nada nuevo que anadir (colapso de ortogonalidad)
+    Sh = S_operador @ Bh
+    Bn, Sn = _lambda_ortho_bloque(Bh, Sh)
+    return np.hstack((Vk, Bn)), np.hstack((LVk, Sn))

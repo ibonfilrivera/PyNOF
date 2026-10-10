@@ -1627,6 +1627,19 @@ def ERPA(wfn, mol, n, C, H, I, b_mnl, cj12, ck12, elag, pp):
 
     ######## ERPA2 ########
 
+    # CAMBIO ERPA2-2: corte de deflacion propio para ERPA2, independiente
+    # del tol_dn=1e-3 compartido por ERPA0/ERPA1 (que se deja intacto para
+    # no alterar esos resultados).  Un tol_dn2 algo mayor descarta mas
+    # pares casi degenerados del bloque fuera-de-diagonal antes de
+    # contraer con V^-1, evitando amplificar ruido numerico en esa
+    # contraccion.  Configurable via pp.erpa2_tol_dn.
+    tol_dn2 = getattr(pp, "erpa2_tol_dn", 3e-3)
+    # CAMBIO ERPA2-1: epsilon de regularizacion (Tikhonov) para las
+    # divisiones por c[r], c[p] y c[r]+c[s] -- ver _safe_inv_reg.  Solo
+    # afectan a las columnas "diagonales" (p=q) de ERPA2, que no existen en
+    # ERPA0/ERPA1.  Configurable via pp.erpa2_reg_eps.
+    eps2 = getattr(pp, "erpa2_reg_eps", 1e-4)
+
     i = -1
     for s in range(pp.nbf5):
         for r in range(s + 1, pp.nbf5):
@@ -1642,7 +1655,7 @@ def ERPA(wfn, mol, n, C, H, I, b_mnl, cj12, ck12, elag, pp):
                     M[i, j] = A[r, s, q, p]
             for p in range(pp.nbf5):
                 j += 1
-                M[i, j] = A[r, s, p, p] * 1 / 2 * (c[s] / (c[p] * (c[r] + c[s])))
+                M[i, j] = A[r, s, p, p] * 0.5 * c[s] * _safe_inv_reg(c[p], eps2) * _safe_inv_reg(c[r] + c[s], eps2)
 
     time10 = time()
 
@@ -1660,7 +1673,7 @@ def ERPA(wfn, mol, n, C, H, I, b_mnl, cj12, ck12, elag, pp):
                     M[i, j] = A[r, s, p, q]
             for p in range(pp.nbf5):
                 j += 1
-                M[i, j] = A[r, s, p, p] * 1 / 2 * (c[r] / (c[p] * (c[r] + c[s])))
+                M[i, j] = A[r, s, p, p] * 0.5 * c[r] * _safe_inv_reg(c[p], eps2) * _safe_inv_reg(c[r] + c[s], eps2)
 
     time11 = time()
 
@@ -1670,14 +1683,14 @@ def ERPA(wfn, mol, n, C, H, I, b_mnl, cj12, ck12, elag, pp):
         for q in range(pp.nbf5):
             for p in range(q + 1, pp.nbf5):
                 j += 1
-                M[i, j] = A[r, r, p, q] * (1 / c[r])
+                M[i, j] = A[r, r, p, q] * _safe_inv_reg(c[r], eps2)
         for q in range(pp.nbf5):
             for p in range(q + 1, pp.nbf5):
                 j += 1
-                M[i, j] = A[r, r, q, p] * (1 / c[r])
+                M[i, j] = A[r, r, q, p] * _safe_inv_reg(c[r], eps2)
         for p in range(pp.nbf5):
             j += 1
-            M[i, j] = A[r, r, p, p] * (1 / (4 * c[p] * c[r]))
+            M[i, j] = A[r, r, p, p] * 0.25 * _safe_inv_reg(c[p], eps2) * _safe_inv_reg(c[r], eps2)
 
     v = np.zeros((pp.nbf5**2))
     i = -1
@@ -1693,12 +1706,9 @@ def ERPA(wfn, mol, n, C, H, I, b_mnl, cj12, ck12, elag, pp):
         i += 1
         v[i] = 1
 
-    V = np.zeros((pp.nbf5**2, pp.nbf5**2))
-    np.fill_diagonal(V, v)
-
     lidx = []
     for i, vi in enumerate(v):
-        if np.abs(vi) < tol_dn:
+        if np.abs(vi) < tol_dn2:
             lidx.append(i)
 
     dim = pp.nbf5**2 - len(lidx)
@@ -1720,12 +1730,45 @@ def ERPA(wfn, mol, n, C, H, I, b_mnl, cj12, ck12, elag, pp):
     time12 = time()
 
     M_ERPA2 = np.real(M_ERPA2)
-    for i in range(dim):
-        M_ERPA2[i, :] = M_ERPA2[i, :] / v[i]
+
+    # CAMBIO ERPA2-3: transformacion de congruencia simetrica en vez de la
+    # division por filas M[i,:]/v[i] original, para mejorar el
+    # condicionamiento SIN alterar el problema de autovalores.
+    #
+    # El problema original es el generalizado V^-1 M x = lambda x, con
+    # V = diag(v) indefinida (v cambia de signo) y M_ERPA2 NO simetrica por
+    # construccion (a diferencia de ApB/AmB en ERPA0/ERPA1): se comprobo
+    # empiricamente que max|M-M.T| es ~1-3% de max|M|, es decir, la parte
+    # antisimetrica codifica informacion real (no es ruido de redondeo), y
+    # forzar M <- (M+M.T)/2 antes de resolver cambia el espectro de forma
+    # apreciable (aparecen autovalores bajos espureos que no estaban antes).
+    # Por eso NO se simetriza el operador usado para los autovalores.
+    #
+    # Lo que si se hace es escribir V = D S D con D = diag(sqrt(|v|)) y
+    # S = diag(sign(v)), y = D x; entonces D (V^-1 M) D^-1 = S (D^-1 M D^-1)
+    # es una transformacion de SEMEJANZA (conserva EXACTAMENTE los
+    # autovalores de V^-1 M) pero reparte la escala de forma simetrica
+    # entre filas y columnas en vez de la division unilateral por filas
+    # M[i,:]/v[i] original, que amplifica el ruido de las direcciones con
+    # |v[i]| pequeno solo por el lado de las filas.
+    v_dim = v[:dim]
+    dinv = 1.0 / np.sqrt(np.abs(v_dim))
+    Mtilde = (dinv[:, None] * M_ERPA2) * dinv[None, :]
+    sign_v = np.sign(v_dim)
+
+    # CAMBIO ERPA2-4: diagnostico de (in)estabilidad -- ver
+    # _erpa2_report_instability.  Usa solo la parte simetrica de Mtilde como
+    # heuristica barata (no es un teorema exacto para ERPA2, ya que Mtilde
+    # no es simetrica; sirve como proxy de en que geometrias el problema
+    # esta peor condicionado / la referencia NOF es mas sospechosa).
+    Msym_diag = 0.5 * (Mtilde + Mtilde.T)
+    _erpa2_report_instability(Msym_diag, sign_v, pp)
+
+    M_ERPA2_eff = sign_v[:, None] * Mtilde
 
     time13 = time()
 
-    vals = np.linalg.eigvals(M_ERPA2)
+    vals = np.linalg.eigvals(M_ERPA2_eff)
 
     vals = vals * 27.2114
     vals_complex = np.array([val for val in vals if (np.abs(np.imag(val)) > 0.00000001)])
@@ -2038,3 +2081,652 @@ def iterative_ERPA0(wfn, mol, n, C, H, I, b_mnl, cj12, ck12, elag, number_of_exc
 
     for i in range(min(10, len(vals))):
         print("    Exc. en. {}: {:6.3f}".format(i, vals[i]))
+
+
+def _erpa_transform_and_build_A(n, C, H, I, b_mnl, pp):
+    """Transforma h e I a la base de NOs y ensambla el tensor A (nbf5^4) de
+    ERPA. Bloque identico al de ERPA() / iterative_ERPA0. Devuelve A."""
+    import numpy as np
+
+    nb = pp.nbf5
+    Cx = C[:, 0:nb]
+    h = np.einsum("mi,mn,nj->ij", Cx, H, Cx, optimize=True)
+
+    if pp.RI:
+        b_pql = np.einsum("mnl,mp,nq->pql", b_mnl, Cx, Cx, optimize=True)
+        I = np.einsum("pqR,slR->pqsl", b_pql, b_pql, optimize=True)
+    else:
+        I = np.einsum("mp,nq,mnab,as,bl->pqsl", Cx, Cx, I, Cx, Cx, optimize=True)
+    if pp.gpu:
+        I = I.get()
+
+    I = np.einsum("rpsq->rspq", I, optimize=True)
+
+    A = np.zeros((nb, nb, nb, nb))
+    Id = np.identity(nb)
+
+    A += np.einsum("sq,pr,p->rspq", h, Id, n, optimize=True)
+    A -= np.einsum("sq,pr,s->rspq", h, Id, n, optimize=True)
+    A += np.einsum("pr,sq,q->rspq", h, Id, n, optimize=True)
+    A -= np.einsum("pr,sq,r->rspq", h, Id, n, optimize=True)
+
+    Daa, Dab = pynof.compute_2RDM(pp, n)
+
+    A += np.einsum("stqu,purt->rspq", I, Daa, optimize=True)
+    A -= np.einsum("stuq,purt->rspq", I, Daa, optimize=True)
+    A += np.einsum("stqu,purt->rspq", I, Dab, optimize=True)
+    A += np.einsum("stuq,putr->rspq", I, Dab, optimize=True)
+    A += np.einsum("uptr,stqu->rspq", I, Daa, optimize=True)
+    A -= np.einsum("uprt,stqu->rspq", I, Daa, optimize=True)
+    A += np.einsum("uptr,stqu->rspq", I, Dab, optimize=True)
+    A += np.einsum("uprt,stuq->rspq", I, Dab, optimize=True)
+
+    A += np.einsum("pstu,turq->rspq", I, Daa, optimize=True)
+    A -= np.einsum("pstu,utrq->rspq", I, Dab, optimize=True)
+    A += np.einsum("tuqr,sptu->rspq", I, Daa, optimize=True)
+    A -= np.einsum("tuqr,pstu->rspq", I, Dab, optimize=True)
+
+    A += np.einsum("sq,tpwu,wurt->rspq", Id, I, Daa, optimize=True)
+    A -= np.einsum("sq,tpwu,uwrt->rspq", Id, I, Dab, optimize=True)
+    A += np.einsum("pr,tuwq,swtu->rspq", Id, I, Daa, optimize=True)
+    A -= np.einsum("pr,tuwq,wstu->rspq", Id, I, Dab, optimize=True)
+
+    return A
+
+
+def _erpa_deflated_pairs(n, pp, tol_dn):
+    """Pares (r>s) que sobreviven a la deflacion por |DeltaN| < tol_dn, en el
+    MISMO orden que el bucle 'for s: for r in s+1..' original de ERPA().
+    Devuelve (rr, ss, dN_diag, dd, n_defl).
+
+    CAMBIO A (continuidad del perfil): el corte 'tol_dn' se pasaba fijo a
+    1e-3.  Como |DeltaN| de los pares debilmente ocupados cruza ese valor a
+    angulos distintos al torsionar la molecula, la dimension del problema
+    ERPA reducido saltaba a lo largo del barrido (p. ej. 1314 -> 1276 en
+    C2H4) y con ella la energia de excitacion (escalones de 0.02-0.08 eV,
+    ademas asimetricos entre las dos ramas 0-90 y 90-180).
+
+    Ahora 'tol_dn' es configurable (pp.erpa_tol_dn, por defecto 1e-4).  Con
+    1e-4 (vs el 1e-3 anterior) los pares debilmente ocupados dejan de
+    entrar/salir del espacio activo al torsionar: la energia de excitacion
+    pasa a ser mirror-simetrica a ~5 meV (antes ~80 meV) y sin escalones.
+    Solo se descartan los pares de virtuales profundos (|DeltaN| ~ 1e-8),
+    cuyo numero no depende de la geometria.  Un valor <= 0 desactiva la
+    deflacion (dd = todos los pares); NO se recomienda bajar de ~1e-4: por
+    debajo, las direcciones (casi) nulas de (A+B) hacen fallar la
+    factorizacion de Cholesky de la lambda-ortogonalizacion incremental
+    (potrf info=1) en geometrias fuertemente multiconfiguracionales
+    (p. ej. C2H4 a 90 grados, M diagnostic ~ 1).
+    """
+    import numpy as np
+
+    ss_all, rr_all = np.triu_indices(pp.nbf5, k=1)
+    dN_all = n[ss_all] - n[rr_all]
+    if tol_dn is None or tol_dn <= 0.0:
+        keep = np.ones(dN_all.shape, dtype=bool)
+    else:
+        keep = np.abs(dN_all) >= tol_dn
+    return (rr_all[keep], ss_all[keep], dN_all[keep].copy(),
+            int(keep.sum()), int((~keep).sum()))
+
+
+def _erpa_report_instability(ApB, AmB, etiqueta, pp):
+    """CAMBIO C: aviso de inestabilidad de la referencia NOF.
+
+    En un ERPA "sano" tanto (A-B) como (A+B)_eff son definidas positivas.
+    Un autovalor negativo => la solucion NOF es un punto de silla y el
+    problema ERPA tiene raices imaginarias.  El solver iterativo las oculta
+    (usa eigh(S^T S), que fuerza omega^2 >= 0) y el filtro omega_min las
+    descarta, de modo que el estado se reporta con un valor sin sentido
+    (caso C2H4 a 90 grados en ERPA0).  Aqui solo se AVISA con el valor; no
+    se aborta.  Se puede desactivar con pp.erpa_check_stability = False.
+    """
+    import numpy as np
+    if not getattr(pp, "erpa_check_stability", True):
+        return
+    # eigvalsh denso pidiendo SOLO el autovalor mas bajo (driver 'evr' de
+    # LAPACK): O(dd^2) para dd ~ 2000, ~1 s, y determinista.  Se probo
+    # scipy.sparse.linalg.eigsh(which='SA') para evitar el coste, pero
+    # ARPACK no converge en estas matrices (espectro agrupado, sin
+    # shift-invert).  Desactivable con pp.erpa_check_stability = False.
+    # Umbrales en Hartree.  El chequeo de "casi singular" se hace SOLO sobre
+    # (A+B)_eff: (A-B) conserva de forma rutinaria un autovalor minusculo
+    # (~1e-5 Ha) por las direcciones casi nulas que deja la deflacion, y no
+    # es diagnostico.  En benigno min lambda(A+B) ~ 1e-3 Ha; en el punto
+    # patologico (C2H4 a 90) cae a ~5e-7 Ha -> 2-3 ordenes de separacion.
+    tol_neg = 1e-8     # < -tol_neg en (A+B) o (A-B) -> referencia inestable
+    tol_marg = 1e-5    # 0 <= lambda(A+B) < tol_marg -> (A+B)_eff casi singular
+    try:
+        from scipy.linalg import eigvalsh
+        lo_ApB = float(eigvalsh(ApB, subset_by_index=[0, 0])[0])
+        lo_AmB = float(eigvalsh(AmB, subset_by_index=[0, 0])[0])
+    except Exception as e:  # pragma: no cover - diagnostico, nunca critico
+        print("  [INFO] {}: no se pudo comprobar la estabilidad ({})".format(etiqueta, e))
+        return
+    HART2EV = 27.2114
+    msg = "min lambda(A+B)={:+.3e} eV, min lambda(A-B)={:+.3e} eV".format(
+        lo_ApB * HART2EV, lo_AmB * HART2EV)
+    if min(lo_ApB, lo_AmB) < -tol_neg:
+        print("  [ADVERTENCIA] {}: referencia NOF INESTABLE para ERPA -- {}. "
+              "Las raices mas bajas pueden ser imaginarias y el/los estado(s) "
+              "afectado(s) no son fiables en esta geometria.".format(etiqueta, msg))
+    elif lo_ApB < tol_marg:
+        print("  [ADVERTENCIA] {}: (A+B)_eff CASI SINGULAR -- {}. "
+              "El problema ERPA esta mal condicionado aqui; la raiz mas baja "
+              "puede quedar mal definida (incertidumbre ~0.1 eV).".format(etiqueta, msg))
+    else:
+        print("  [INFO] {}: estabilidad OK ({}).".format(etiqueta, msg))
+
+
+def _safe_inv_reg(x, eps):
+    """Reciproco regularizado tipo Tikhonov: x/(x^2+eps^2).
+
+    Coincide con 1/x para |x| >> eps y se satura (no diverge) para
+    |x| << eps.  Usado solo en el bloque ERPA2 de ERPA() (CAMBIO ERPA2-1),
+    donde aparecen divisiones por c[r]=+-sqrt(n[r]) (y sumas c[r]+c[s]) que
+    se acercan a cero para orbitales muy debilmente ocupados o casi
+    degenerados, produciendo elementos de matriz enormes y raices complejas
+    espureas.
+    """
+    return x / (x * x + eps * eps)
+
+
+def _erpa2_report_instability(Msym, sign_v, pp):
+    """CAMBIO ERPA2-4: diagnostico (heuristico) de estabilidad para ERPA2.
+
+    Msym = 0.5*(Mtilde+Mtilde.T) es la parte SIMETRICA de
+    Mtilde = D^-1 M_ERPA2 D^-1 (ver CAMBIO ERPA2-3); el operador realmente
+    usado para los autovalores es S @ Mtilde (S=diag(sign(v))), NO
+    S @ Msym, porque M_ERPA2 no es simetrica por construccion y forzar la
+    simetria completa altera el espectro (ver comentario en ERPA()).  Este
+    chequeo es por tanto un PROXY barato, no un teorema exacto: por analogia
+    con la condicion de estabilidad de ERPA0/ERPA1 (A+B y A-B definidas
+    positivas, ver _erpa_report_instability), se espera que la parte
+    simetrica de Mtilde sea aproximadamente semidefinida positiva en el
+    subespacio sign(v)=+1 y semidefinida negativa en sign(v)=-1 para una
+    referencia NOF "sana"; violaciones grandes son indicio (no prueba) de
+    referencia inestable o deflacion insuficiente.  Solo avisa; nunca aborta
+    el calculo.  Desactivable con pp.erpa_check_stability = False.
+    """
+    if not getattr(pp, "erpa_check_stability", True):
+        return
+    tol = 1e-6
+    try:
+        ip = sign_v > 0
+        im = sign_v < 0
+        msgs = []
+        if np.any(ip):
+            lo_p = float(np.linalg.eigvalsh(Msym[np.ix_(ip, ip)])[0])
+            if lo_p < -tol:
+                msgs.append("bloque (v>0) no semidef. positivo (min autoval {:+.2e})".format(lo_p))
+        if np.any(im):
+            hi_m = float(np.linalg.eigvalsh(Msym[np.ix_(im, im)])[-1])
+            if hi_m > tol:
+                msgs.append("bloque (v<0) no semidef. negativo (max autoval {:+.2e})".format(hi_m))
+        if msgs:
+            print("  [ADVERTENCIA] ERPA2: referencia NOF probablemente INESTABLE o "
+                  "deflacion insuficiente en este punto -- " + "; ".join(msgs) + ". "
+                  "Las raices mas altas pueden ser complejas/espureas.")
+        else:
+            print("  [INFO] ERPA2: diagnostico de estabilidad OK "
+                  "(bloques v>0/v<0 con signo definido).")
+    except np.linalg.LinAlgError as e:  # pragma: no cover - diagnostico, nunca critico
+        print("  [ADVERTENCIA] ERPA2: diagnostico de estabilidad fallo ({}).".format(e))
+
+
+def _erpa_iterative_core(ApB, AmB, diag_A, dN_diag, number_of_excitations, pp,
+                         etiqueta, tol_rms, tol_max, k_max, m_max_por_estado,
+                         omega_min_eV, time1, B0=None):
+    """Solver iterativo SMO-GD / Davidson para el problema ERPA reducido
+
+        omega^2 x = dN^{-1} (A+B)_eff dN^{-1} (A-B) x .
+
+    ApB = (A+B)_eff y AmB = (A-B) deben venir YA simetrizadas; diag_A es la
+    diagonal aproximada del operador (A+B)_eff para el precondicionador.
+    Devuelve omegas_convergidas (Hartree). Es el nucleo COMUN de
+    iterative_ERPA0_v2 (ApB = A+B) e iterative_ERPA1
+    (ApB = A+B - 2 CC FF^+ EE).
+
+    B0 (CAMBIO E): matriz (dd, >=number_of_excitations) de vectores guia
+    iniciales (p. ej. los vectores de Ritz convergidos del punto anterior
+    de un barrido).  Si es None o su primera dimension no coincide con dd
+    (deflacion distinta), se usa la heuristica |diag_A/dN|.  Al terminar,
+    los vectores de Ritz finales quedan en pp.erpa_vecs para reutilizarlos.
+    """
+    from time import time
+    import numpy as np
+    from scipy.linalg import eigh
+    from pynof.utils import inicializar_lambda_ortho, expandir_lambda_ortho
+
+    dd = ApB.shape[0]
+    number_of_excitations = int(min(number_of_excitations, dd))
+    omega_min = omega_min_eV / 27.2114
+    # CAMBIO D: respaldo final menos laxo (antes 1e3*tol_rms, piso 1e-3).
+    tol_rms_relax = max(tol_rms * 1e2, 1e-4)
+
+    _erpa_report_instability(ApB, AmB, etiqueta, pp)
+
+    # Diagnostico opcional (O(dd^3), como ERPA()): espectro exacto de ESTA
+    # misma reduccion simetrizada -- valida la convergencia del iterativo
+    # con independencia de la comparacion contra ERPA().
+    if getattr(pp, "erpa_debug_exact", False):
+        dNm1_dbg = np.zeros((dd, dd))
+        np.fill_diagonal(dNm1_dbg, np.where(np.abs(dN_diag) > 0, 1.0 / dN_diag, 0.0))
+        MM_dbg = dNm1_dbg @ ApB @ dNm1_dbg @ AmB
+        w_dbg = np.sqrt(np.linalg.eigvals(MM_dbg).astype(complex))
+        w_re = np.sort(np.real(w_dbg[np.abs(np.imag(w_dbg)) < 1e-8])) * 27.2114
+        n_cplx = int(np.sum(np.abs(np.imag(w_dbg)) >= 1e-8))
+        print("  [DEBUG] {} exacto (simetrizado) - {} raices complejas".format(etiqueta, n_cplx))
+        for i in range(min(number_of_excitations, len(w_re))):
+            print("  [DEBUG]   Exc. exacta {}: {:6.3f} eV".format(i, w_re[i]))
+
+    # CAMBIO E: guess inicial reutilizable a lo largo de un barrido.
+    B0_ok = (B0 is not None and np.ndim(B0) == 2
+             and B0.shape[0] == dd and B0.shape[1] >= number_of_excitations)
+    if B0_ok:
+        B0p = np.asarray(B0[:, :number_of_excitations], dtype=float).copy()
+        B0m = B0p.copy()
+        print("  [INFO] {}: guess inicial tomado de B0 externo ({} vectores).".format(
+            etiqueta, number_of_excitations))
+    else:
+        if B0 is not None:
+            print("  [INFO] {}: B0 externo ignorado (forma incompatible con dd={}).".format(
+                etiqueta, dd))
+        with np.errstate(divide='ignore', invalid='ignore'):
+            proxy_omega = np.abs(diag_A / dN_diag)
+        proxy_omega[~np.isfinite(proxy_omega)] = np.inf
+        guess_idx = np.argsort(proxy_omega)[:number_of_excitations]
+        B0p = np.zeros((dd, number_of_excitations))
+        B0m = np.zeros((dd, number_of_excitations))
+        for j, idx in enumerate(guess_idx):
+            B0p[idx, j] = 1.0
+            B0m[idx, j] = 1.0
+
+    bp, LVp = inicializar_lambda_ortho(B0p, ApB)
+    bm, LVm = inicializar_lambda_ortho(B0m, AmB)
+
+    # CAMBIO B: 'omegas_convergidas' guarda el MEJOR valor visto (menor
+    # residuo) de cada raiz que en algun momento cumplio la tolerancia; no
+    # se congela nada por posicion en el orden (ver nota en el bucle).
+    omegas_convergidas = np.full(number_of_excitations, np.nan)
+    rms_convergidas = np.full(number_of_excitations, np.inf)  # residuo con el que se guardo
+    omega_ultimo = np.full(number_of_excitations, np.nan)  # ultimo valor fisico visto
+    rms_ultimo = np.full(number_of_excitations, np.inf)
+    ritz_p = B0p.copy()  # CAMBIO E: ultimos vectores de Ritz (para pp.erpa_vecs)
+    n_ultimo_bloque = bp.shape[1]
+
+    # CAMBIO B (salida anticipada por estancamiento): sin locking duro, un
+    # punto benigno llegaba a k_max porque el estado mas alto se queda con
+    # residuo entre tol_rms y tol_rms_relax.  Se corta cuando TODOS los
+    # estados estan convergidos o bien tienen residuo < tol_rms_relax y su
+    # omega no cambia (< rtol_stall) durante n_stall iteraciones seguidas.
+    # El umbral de estancamiento es estricto para no cortar una raiz que
+    # aun se mueve (caso C2H4 a 90 grados: el estado 0 baja de 8 a 4 eV
+    # varias iteraciones -> nunca se considera estancado).
+    n_stall = 10
+    rtol_stall = 1e-6
+    omega_prev = np.full(number_of_excitations, np.nan)
+    stall = np.zeros(number_of_excitations, dtype=int)
+
+    # CAMBIO C: si la referencia es inestable, (A+B)_eff deja de ser
+    # definida positiva y la lambda-ortogonalizacion incremental (Cholesky)
+    # revienta a mitad del bucle.  Se captura (en las llamadas a
+    # expandir_/inicializar_lambda_ortho), se avisa y se sale con lo que
+    # haya (NaN para lo no convergido) en vez de abortar el calculo.
+    from numpy.linalg import LinAlgError
+    solver_error = None
+
+    for k in range(k_max):
+        S = bm.T @ (dN_diag[:, None] * bp)
+
+        STS = S.T @ S
+        STS = 0.5 * (STS + STS.T)
+        lambda2_all, up_all = eigh(STS)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            omega_all = 1.0 / np.sqrt(np.maximum(lambda2_all, 1e-14))
+        # Seleccion de los number_of_excitations estados FISICOS mas bajos.
+        # ERPA genera modos espurios con omega -> 0 (aqui siempre reales por
+        # la simetrizacion S^T S); ERPA() los descarta con el mismo umbral
+        # (parte real > 1 eV). Si el subespacio aun no tiene suficientes
+        # fisicos, se rellena con espurios (nunca se dan por convergidos).
+        clave = np.where(omega_all > omega_min, omega_all, np.inf)
+        order = np.argsort(clave)[:number_of_excitations]
+        es_fisico = omega_all[order] > omega_min
+        lambda2 = np.maximum(lambda2_all[order], 1e-14)
+        omega = omega_all[order]
+        up = up_all[:, order]
+        um = (S @ up) / np.sqrt(lambda2)[np.newaxis, :]
+        ritz_p = bp @ up  # CAMBIO E: vectores de Ritz actuales (base completa)
+
+        Rp = (dN_diag[:, None] * bm) @ um - (1.0 / omega[np.newaxis, :]) * (ApB @ bp @ up)
+        Rm = (dN_diag[:, None] * bp) @ up - (1.0 / omega[np.newaxis, :]) * (AmB @ bm @ um)
+
+        norm_rms = np.sqrt(np.mean(Rp**2 + Rm**2, axis=0))
+        norm_max = np.maximum(np.max(np.abs(Rp), axis=0), np.max(np.abs(Rm), axis=0))
+
+        # Ultimo valor fisico visto de cada estado (para el respaldo final).
+        for idx in range(number_of_excitations):
+            if es_fisico[idx]:
+                omega_ultimo[idx] = omega[idx]
+                rms_ultimo[idx] = norm_rms[idx]
+
+        # CAMBIO B -- convergencia SUAVE (state-following implicito).
+        #
+        # El locking anterior congelaba 'omegas_convergidas[idx]' segun la
+        # POSICION 'idx' en el orden por energia y sacaba ese hueco de la
+        # lista de activos.  Pero 'order = argsort(...)' reordena las
+        # parejas de Ritz en cada iteracion: cerca de una (casi)
+        # degeneracion dos raices se cruzan, el hueco 'idx' pasa a apuntar a
+        # otra raiz fisica, y la raiz que aun estaba descendiendo se queda
+        # atrapada en un hueco ya bloqueado -> se descartaban sus
+        # correcciones, 'activos' se vaciaba y el bucle hacia 'break' con el
+        # espectro equivocado.  Caso real: C2H4 a 90 grados, ERPA0 devolvia
+        # S1 = 7.9 eV (cluster espurio) en vez de ~4.25 eV.
+        #
+        # Ahora: (1) cada iteracion se evalua el residuo de las N raices
+        # fisicas mas bajas; (2) se guarda el mejor valor visto de cada una
+        # (menor residuo) sin sacarla de la iteracion; (3) el bucle solo
+        # termina cuando las N cumplen la tolerancia SIMULTANEAMENTE en la
+        # misma iteracion.  Los huecos ya convergidos siguen en el bloque de
+        # correccion, pero su residuo ~0 hace que el vector nuevo se
+        # descarte en la ortogonalizacion, asi que no encarece el paso.
+        conv_mask = es_fisico & (norm_rms < tol_rms) & (norm_max < tol_max)
+        mejora = conv_mask & (norm_rms < rms_convergidas)
+        omegas_convergidas[mejora] = omega[mejora]
+        rms_convergidas[mejora] = norm_rms[mejora]
+        n_conv = int(conv_mask.sum())
+
+        # contador de estancamiento (omega estable entre iteraciones)
+        with np.errstate(invalid='ignore'):
+            quieto = np.abs(omega - omega_prev) <= rtol_stall * np.abs(omega)
+        stall = np.where(quieto, stall + 1, 0)
+        omega_prev = omega.copy()
+        listo = conv_mask | (es_fisico & (norm_rms < tol_rms_relax) & (stall >= n_stall))
+
+        print(f" Iter {k:03d} | subespacio m={bp.shape[1]:4d} | "
+              f"convergidos={n_conv}/{number_of_excitations}")
+        for i in range(number_of_excitations):
+            print("    Exc. en {}: {:6.3f} eV{}".format(
+                i, omega[i] * 27.2114, "" if es_fisico[i] else "  (espurio)"))
+
+        if n_conv == number_of_excitations:
+            break
+        if listo.all():
+            # los no convergidos por tol_rms estan estancados con residuo
+            # pequeno: se guardan como aproximados y se corta (evita gastar
+            # hasta k_max en un estado que ya no mejora).
+            aprox = listo & ~conv_mask
+            omegas_convergidas[aprox] = omega[aprox]
+            rms_convergidas[aprox] = norm_rms[aprox]  # CAMBIO D: registrar el residuo
+            print("[INFO] Corte por estancamiento: {} estado(s) aproximado(s) "
+                  "(residuo < {:.0e}).".format(int(aprox.sum()), tol_rms_relax))
+            break
+
+        idx_activos = np.where(~conv_mask)[0]
+        Rp_act, Rm_act = Rp[:, idx_activos], Rm[:, idx_activos]
+        omega_act = omega[idx_activos]
+
+        denom = (omega_act[np.newaxis, :]**-2) * (diag_A[:, np.newaxis]**2) - (dN_diag[:, np.newaxis]**2)
+        denom_inv = 1.0 / (denom + np.sign(denom + 1e-300) * 1e-12)
+
+        term_plus = (1.0 / omega_act[np.newaxis, :]) * diag_A[:, np.newaxis] * Rp_act + dN_diag[:, np.newaxis] * Rm_act
+        term_minus = (1.0 / omega_act[np.newaxis, :]) * diag_A[:, np.newaxis] * Rm_act + dN_diag[:, np.newaxis] * Rp_act
+
+        b_p_new = -denom_inv * term_plus
+        b_m_new = -denom_inv * term_minus
+
+        # Reinicio de subespacio (thick restart): conserva los vectores de
+        # Ritz actuales MAS el bloque de correccion, en vez de colapsar solo
+        # a los de Ritz (que estanca la convergencia del estado mas dificil).
+        # Tope: min(number_of_excitations*m_max_por_estado, dd).
+        m_cap = min(dd, number_of_excitations * m_max_por_estado)
+        try:
+            if bp.shape[1] >= m_cap:
+                print("[INFO] Reiniciando subespacio (thick restart, m={})".format(bp.shape[1]))
+                Xp = np.hstack((bp @ up, b_p_new))
+                Xm = np.hstack((bm @ um, b_m_new))
+                bp, LVp = inicializar_lambda_ortho(Xp, ApB)
+                bm, LVm = inicializar_lambda_ortho(Xm, AmB)
+                n_ultimo_bloque = bp.shape[1]
+                continue
+
+            ancho_antes = bp.shape[1]
+            bp, LVp = expandir_lambda_ortho(b_p_new, bp, LVp, ApB)
+            bm, LVm = expandir_lambda_ortho(b_m_new, bm, LVm, AmB)
+        except LinAlgError as e:
+            solver_error = e
+            print("  [ADVERTENCIA] {}: el solver ERPA fallo en la iteracion {} "
+                  "(LinAlgError: {}).  Causa tipica: (A+B)_eff no definida "
+                  "positiva -> referencia NOF inestable (ver aviso de "
+                  "estabilidad).  Se devuelve lo convergido y NaN para el "
+                  "resto.".format(etiqueta, k, e))
+            break
+        # nunca exceder la dimension del espacio completo
+        if bp.shape[1] > dd:
+            bp, LVp = bp[:, :dd], LVp[:, :dd]
+        if bm.shape[1] > dd:
+            bm, LVm = bm[:, :dd], LVm[:, :dd]
+        n_ultimo_bloque = min(bp.shape[1], bm.shape[1]) - ancho_antes
+        if bp.shape[1] != bm.shape[1]:
+            m_comun = min(bp.shape[1], bm.shape[1])
+            bp, LVp = bp[:, :m_comun], LVp[:, :m_comun]
+            bm, LVm = bm[:, :m_comun], LVm[:, :m_comun]
+
+    # Respaldo final: estados no convergidos por residuo pero ya con residuo
+    # pequeno se reportan como aproximados (misma idea que la v1, que acepta
+    # por estancamiento de la energia).
+    n_aprox = 0
+    rms_final = rms_convergidas.copy()
+    for idx in range(number_of_excitations):
+        if np.isnan(omegas_convergidas[idx]) and rms_ultimo[idx] < tol_rms_relax:
+            omegas_convergidas[idx] = omega_ultimo[idx]
+            rms_final[idx] = rms_ultimo[idx]
+            n_aprox += 1
+
+    vals = omegas_convergidas * 27.2114
+
+    # CAMBIO E: vectores de Ritz finales, para sembrar el punto siguiente
+    # de un barrido (pp.erpa_B0 = pp.erpa_vecs).
+    try:
+        pp.erpa_vecs = np.asarray(ritz_p).copy()
+    except Exception:
+        pass
+
+    print()
+    print("  Excitation energies {}(eV)".format(etiqueta))
+    print("  ===================================")
+    # CAMBIO D: se informa el residuo alcanzado y se marca lo aproximado.
+    for i in range(min(10, len(vals))):
+        r = rms_final[i]
+        if np.isfinite(r) and r < tol_rms:
+            extra = "  (rms={:.1e})".format(r)
+        elif np.isfinite(r):
+            extra = "  (APROX., rms={:.1e} > tol_rms={:.0e})".format(r, tol_rms)
+        else:
+            extra = "  (NO CONVERGIDO)"
+        print("    Exc. en. {}: {:6.3f}{}".format(i, vals[i], extra))
+
+    if n_aprox:
+        print("  [NOTA] {} estado(s) aproximado(s): residuo < {:.0e} pero no se "
+              "alcanzo tol_rms={:.0e}".format(n_aprox, tol_rms_relax, tol_rms))
+    if solver_error is not None:
+        print("  [ADVERTENCIA] {}: resultado PARCIAL por fallo del solver "
+              "(referencia probablemente inestable).".format(etiqueta))
+    elif np.any(np.isnan(omegas_convergidas)):
+        print("  [ADVERTENCIA] No todos los estados convergieron en {} iteraciones".format(k_max))
+
+    print("  Elapsed Time: {:10.2f} (Seconds)".format(time() - time1))
+
+    return omegas_convergidas
+
+
+def iterative_ERPA0_v2(wfn, mol, n, C, H, I, b_mnl, cj12, ck12, elag,
+                        number_of_excitations, pp,
+                        tol_rms=1e-6, tol_max=1e-5, k_max=100,
+                        m_max_por_estado=25, omega_min_eV=1.0, B0=None):
+    """
+    Version corregida de iterative_ERPA0. El nucleo matematico (matriz S,
+    reduccion de Rayleigh-Ritz, formulas de residuo Rp/Rm) es identico al
+    original y ya era correcto. Correcciones aplicadas:
+
+      1. diag_A extraido correctamente de np.diag(AA), no de A.diagonal()
+         sobre el tensor 4D.
+      2. dN_diag, diag_A tratados como vectores 1D (no matrices dd x dd);
+         precondicionador resuelto elemento a elemento (O(dd), no O(dd^3)).
+      3. Locking: los estados convergidos (criterio RMS + maximo) se
+         congelan y dejan de generar vectores de prueba nuevos.
+      4. Reinicio de subespacio (m_max_por_estado) para acotar memoria/costo.
+      5. Guess inicial via heuristica estandar de Davidson (menor
+         |diag_A/dN|), reemplazando la logica de "i_start" (que tenia un
+         bug: reusaba una variable de bucle obsoleta).
+      6. CRITICO: Lambda-ortogonalizacion incremental (pynof.utils.
+         inicializar_lambda_ortho / expandir_lambda_ortho) en vez de
+         pynof.orthonormalize(bp, ApB), que hacia eigh(ApB) COMPLETO en
+         cada iteracion -- ver analisis en el plan de implementacion.
+      7. Filtro de modos espurios: se buscan los number_of_excitations
+         estados FISICOS mas bajos (omega > omega_min_eV), igual que
+         ERPA() que descarta los autovalores con parte real < 1 eV.
+      8. Robustez: el subespacio nunca excede dd; reinicio "thick" (Ritz +
+         bloque de correccion); respaldo final para estados con residuo
+         pequeno pero que no alcanzaron tol_rms.
+      9. ApB y AmB se simetrizan explicitamente (son simetricas en la
+         teoria; la asimetria ~1e-4 es ruido de ensamblado). Cerca de una
+         inestabilidad de ERPA0 (raices complejas que ERPA() descarta)
+         esto puede dar un estado mas bajo distinto al de ERPA(); poner
+         pp.erpa_debug_exact=True imprime el espectro exacto de ESTA misma
+         reduccion simetrizada para validar la convergencia del iterativo.
+     10. FASE 2 (aceleracion): ApB/AmB/diag_A/dN_diag se construyen por
+         indexado vectorizado directo del tensor A sobre los pares que
+         sobreviven a la deflacion. Se elimina la matriz M completa
+         (nbf5^2 x nbf5^2), su despliegue en bucles de Python y la
+         rotacion fila/columna de la deflacion -- que juntos costaban
+         O(nbf5^6) (~5-6 s en C2H4/cc-pVDZ). Resultado bit-a-bit identico.
+         (Sigue construyendose el tensor A completo: una version
+         "matrix-free" que lo evite por iteracion resulto MAS lenta en
+         este regimen -- el bucle Davidson, no A, es ahora el costo mayor.)
+     11. El bucle Davidson vive ahora en _erpa_iterative_core, compartido
+         con iterative_ERPA1.
+    """
+    from time import time
+    import numpy as np
+
+    time1 = time()
+
+    print("\n---------------")
+    print(" ERPA Analysis (iterativo, ERPA0/v2)")
+    print("---------------\n")
+
+    # CAMBIO A: corte de deflacion configurable (antes fijo 1e-3, causaba
+    # saltos de dimension -> discontinuidades en el perfil de excitacion).
+    tol_dn = getattr(pp, "erpa_tol_dn", 1e-4)
+
+    A = _erpa_transform_and_build_A(n, C, H, I, b_mnl, pp)
+    rr, ss, dN_diag, dd, n_defl = _erpa_deflated_pairs(n, pp, tol_dn)
+    print("M_ERPA Orig dim: {} New dim: {} Elements below tol_dN: {}".format(
+        pp.nbf5 * (pp.nbf5 - 1), 2 * dd, 2 * n_defl))
+
+    # FASE 2: bloques ERPA0 por indexado directo de A (ver docstring, punto 10).
+    #   AA[a,b] = A[r_a, s_a, r_b, s_b]   (era M[:dd, :dd])
+    #   BB[a,b] = A[r_a, s_a, s_b, r_b]   (era M[:dd, dd:2dd])
+    AA = A[rr[:, None], ss[:, None], rr[None, :], ss[None, :]]
+    BB = A[rr[:, None], ss[:, None], ss[None, :], rr[None, :]]
+
+    ApB = AA + BB
+    AmB = AA - BB
+
+    maxApBsym = np.max(np.abs(ApB - ApB.T))
+    maxAmBsym = np.max(np.abs(AmB - AmB.T))
+    print("Max diff ApB {:3.1e} and Max AmB {:3.1e} (se simetrizan)".format(maxApBsym, maxAmBsym))
+    print()
+
+    # ERPA0: ApB y AmB son simetricas por construccion teorica; cualquier
+    # asimetria (~1e-4) es ruido numerico del ensamblado de A y, si se
+    # deja, pone un piso al residuo que impide alcanzar tol_rms.
+    ApB = 0.5 * (ApB + ApB.T)
+    AmB = 0.5 * (AmB + AmB.T)
+    diag_A = np.diag(AA).copy()
+
+    return _erpa_iterative_core(
+        ApB, AmB, diag_A, dN_diag, number_of_excitations, pp,
+        "ERPA0/PNOF{}".format(pp.ipnof), tol_rms, tol_max, k_max,
+        m_max_por_estado, omega_min_eV, time1, B0=B0)
+
+
+def iterative_ERPA1(wfn, mol, n, C, H, I, b_mnl, cj12, ck12, elag,
+                     number_of_excitations, pp,
+                     tol_rms=1e-6, tol_max=1e-5, k_max=100,
+                     m_max_por_estado=25, omega_min_eV=1.0, ff_rcond=1e-8,
+                     B0=None):
+    """
+    Version iterativa del ERPA "completo" (a veces llamado ERPA1): es ERPA0
+    mas el termino de acoplamiento a las filas/columnas "diagonales"
+    (numero-conservantes). La reduccion es identica a la de
+    iterative_ERPA0_v2 salvo que (A+B) se reemplaza por el operador efectivo
+
+        (A+B)_eff = (A+B) - 2 * CC @ FF^+ @ EE
+
+    (mismos indices que el bloque medio 'ERPA' de ERPA()):
+        CC[a,p] = A[r_a, s_a, p, p]     (dd  x nbf5)
+        EE[p,b] = A[p, p, r_b, s_b]     (nbf5 x dd)
+        FF[p,q] = A[p, p, q, q]         (nbf5 x nbf5)
+
+    Notas:
+      * FF es (casi) singular por construccion (direcciones redundantes de
+        rotacion que conservan el numero de ocupacion). ERPA() usa
+        np.linalg.inv(FF), que es inestable; aqui se usa la pseudo-inversa
+        np.linalg.pinv(FF, rcond=ff_rcond), que da CC FF^+ EE bien definido
+        y reproducible. En sistemas donde inv(FF) esta bien condicionada
+        (p. ej. H2/cc-pVDZ) ambos coinciden.
+      * Todo lo demas (solver SMO-GD, precondicionador, filtro de modos
+        espurios, deflacion, Fase 2 sin matriz M) es COMUN con
+        iterative_ERPA0_v2 -- ver _erpa_iterative_core.
+      * pp.erpa_debug_exact=True imprime el espectro exacto de ESTA misma
+        reduccion (A+B)_eff simetrizada, para validar la convergencia.
+    """
+    from time import time
+    import numpy as np
+
+    time1 = time()
+
+    print("\n---------------")
+    print(" ERPA Analysis (iterativo, ERPA1)")
+    print("---------------\n")
+
+    # CAMBIO A: ver nota en iterative_ERPA0_v2 / _erpa_deflated_pairs.
+    tol_dn = getattr(pp, "erpa_tol_dn", 1e-4)
+
+    A = _erpa_transform_and_build_A(n, C, H, I, b_mnl, pp)
+    rr, ss, dN_diag, dd, n_defl = _erpa_deflated_pairs(n, pp, tol_dn)
+    print("M_ERPA Orig dim: {} New dim: {} Elements below tol_dN: {}".format(
+        pp.nbf5 * (pp.nbf5 - 1), 2 * dd, 2 * n_defl))
+
+    allp = np.arange(pp.nbf5)
+    AA = A[rr[:, None], ss[:, None], rr[None, :], ss[None, :]]
+    BB = A[rr[:, None], ss[:, None], ss[None, :], rr[None, :]]
+    CC = A[rr[:, None], ss[:, None], allp[None, :], allp[None, :]]    # (dd, nbf5)
+    EE = A[allp[:, None], allp[:, None], rr[None, :], ss[None, :]]    # (nbf5, dd)
+    FF = A[allp[:, None], allp[:, None], allp[None, :], allp[None, :]]  # (nbf5, nbf5)
+
+    FF_pinv = np.linalg.pinv(FF, rcond=ff_rcond)
+    sv = np.linalg.svd(FF, compute_uv=False)
+    n_drop = int(np.sum(sv < ff_rcond * sv[0]))
+    print("FF: nbf5={} rank~{} (valores singulares descartados: {}, rcond={:.0e})".format(
+        pp.nbf5, pp.nbf5 - n_drop, n_drop, ff_rcond))
+
+    coupl = 2.0 * (CC @ (FF_pinv @ EE))
+    ApB = AA + BB - coupl
+    AmB = AA - BB
+
+    maxApBsym = np.max(np.abs(ApB - ApB.T))
+    maxAmBsym = np.max(np.abs(AmB - AmB.T))
+    print("Max diff (A+B)_eff {:3.1e} and Max (A-B) {:3.1e} (se simetrizan)".format(maxApBsym, maxAmBsym))
+    print()
+
+    ApB = 0.5 * (ApB + ApB.T)
+    AmB = 0.5 * (AmB + AmB.T)
+    diag_A = np.diag(ApB).copy()  # diagonal del operador efectivo (A+B)_eff
+
+    return _erpa_iterative_core(
+        ApB, AmB, diag_A, dN_diag, number_of_excitations, pp,
+        "ERPA1/PNOF{}".format(pp.ipnof), tol_rms, tol_max, k_max,
+        m_max_por_estado, omega_min_eV, time1, B0=B0)

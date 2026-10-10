@@ -75,6 +75,13 @@ class param:
         self.maxloop = 30  # Iteraciones internas en optimización orbital
         self.ipnof = 8  # PNOFi a calcular
         self.ista = 0  # PNOFi a calcular
+        # SOLUCION 3: anchura del "agujero dinamico" de GNOF (ipnof=8).
+        #   F(n) = exp(-((1-n_strong)/gnof_hcut)^2)  activa la correccion
+        #   dinamica n_d solo cerca de capa cerrada.  Valor original
+        #   0.02*sqrt(2) ~ 0.0283 -> transicion abrupta (favorece la
+        #   estructura de dos ramas NOF al romper enlaces).  Aumentarlo
+        #   (~0.05-0.15) suaviza la transicion y puede fusionar las ramas.
+        self.gnof_hcut = 0.02 * np.sqrt(2.0)
         self.threshl = 10**-3  # Convergencia de los multiplicadores de Lagrange
         self.threshe = 10**-4  # Convergencia de la energía
         self.threshec = 10**-8  # Convergencia  de la energía en optimización orbital
@@ -107,9 +114,60 @@ class param:
         self.MSpin = 0
 
         self.lamb = 0.0
+        # erpa_iterative: False = ERPA() completo (comportamiento actual);
+        #   True / "ERPA0" = iterative_ERPA0_v2;  "ERPA1" = iterative_ERPA1.
+        self.erpa_iterative = False
+        self.n_erpa_states = 10      # numero de estados excitados mas bajos a buscar
+        # --- Solver ERPA iterativo (CAMBIO F: knobs antes solo accesibles
+        #     como kwargs de iterative_ERPA0_v2 / iterative_ERPA1) ---
+        self.erpa_tol_dn = 1e-4          # corte de deflacion |Delta n| (CAMBIO A)
+        self.erpa_tol_rms = 1e-6        # tolerancia RMS del residuo por estado
+        self.erpa_tol_max = 1e-5        # tolerancia del residuo maximo por estado
+        self.erpa_kmax = 100           # iteraciones maximas del solver
+        self.erpa_omega_min_eV = 1.0    # umbral para descartar modos espurios
+        self.erpa_check_stability = True  # avisar si la referencia es inestable (CAMBIO C)
+        self.erpa_B0 = None            # guess inicial (dd, >=n_erpa_states) (CAMBIO E);
+        self.erpa_vecs = None          #   el solver deja aqui los vectores de Ritz finales
+        # --- ERPA2 (diagonalizacion completa, ERPA() con erpa_iterative=False) ---
+        #     Soluciones de estabilizacion especificas de ERPA2 (ver
+        #     et-iso/ERPA_full/CHANGELOG_ERPA2.md para el detalle).
+        self.erpa2_tol_dn = 3e-3       # corte de deflacion propio de ERPA2
+        self.erpa2_reg_eps = 1e-4      # eps de regularizacion Tikhonov en 1/c[r], 1/(c[p]*(c[r]+c[s])), etc.
+                                        #   (empiricamente, valores >~5e-4 amortiguan tambien pares debilmente
+                                        #   ocupados fisicos -no solo los casi-singulares- e introducen estados
+                                        #   de baja energia espureos; ver et-iso/ERPA_full/CHANGELOG_ERPA2.md)
         self.occ_method = "Softmax"
         self.orb_method = "ADAM"
         self.alpha = 0.02
+        # --- Multi-solucion de ocupaciones en NOF (para funcionales con
+        #     varias soluciones NOF al romper enlaces, p. ej. GNOF/ipnof=8).
+        #     Solo actua con occ_method="Softmax".  Coste: cada uno multiplica
+        #     el numero de optimizaciones SCF por geometria (~2-4x). ---
+        #   None => automatico: activo si ipnof == 8 (GNOF), inactivo si no.
+        self.occ_multistart = None        # Solucion 1: repetir la optimizacion
+                                          #   desde ocupaciones cerrada y abierta,
+                                          #   quedarse con la de menor energia.
+        self.occ_stability = None         # Solucion 2: tras converger, perturbar
+                                          #   el par frontera (abrir/cerrar) y
+                                          #   re-optimizar; adoptar si baja E.
+        self.occ_multistart_npairs = 1    # nº de pares fuertes (HOMO, HOMO-1,...)
+                                          #   que se abren en el guess "abierto".
+        self.occ_multistart_tol = 1e-5    # mejora minima (Hartree) para cambiar
+                                          #   de solucion.
+        self.occ_multistart_level = 1     # 1 = guesses alt. solo desde orbitales
+                                          #   de core (~3x); 2 = tambien desde los
+                                          #   orbitales de restart (~5x).
+        # --- Hessiano numerico (compute_energy(..., hessian=True), ver hessian.py) ---
+        self.hess_step = 0.02             # desplazamiento cartesiano (bohr); >= 0.02 por el ruido del gradiente
+        self.hess_polish = "lbfgs"        # pulido orbital: "lbfgs", "trust-krylov", "hessp" o "none"
+        self.hess_polish_maxiter = 200    # iteraciones L-BFGS por ciclo de pulido
+        self.hess_max_polish = None       # ciclos max. de pulido (None: 3 con lbfgs, 20 con trust-krylov)
+        self.hess_refine = True           # refinar frecuencias con energias a lo largo de cada modo normal
+        self.hess_refine_step = None      # desplazamiento cartesiano max. del refinamiento (None = 0.04; mas alla cambia la solucion NOF en isocianuros)
+        self.hess_refine_de = 2e-4        # cambio de energia objetivo (Eh) para elegir el paso de cada modo
+        self.hess_linear_tol = 5e-3       # desviacion relativa max. para tratar la molecula como lineal
+        self.hess_linear = None           # None = detectar molecula lineal e imponer simetria cilindrica
+        self.hess_verbose = False         # mostrar la salida de compute_energy en cada desplazamiento
 
     def autozeros(self, restart=False):
         if restart:
