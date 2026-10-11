@@ -668,7 +668,7 @@ def compute_gammas_trigonometric(ndoc, ncwo):
     for i in range(ndoc):
         gamma[i] = np.arccos(np.sqrt(2.0 * 0.999 - 1.0))
         for j in range(ncwo - 1):
-            ig = ndoc + (ndoc - i - 1) + j * ncwo
+            ig = ndoc + (ndoc - i - 1) + j * ndoc
             gamma[ig] = np.arcsin(np.sqrt(1.0 / (ncwo - j)))
     return gamma
 
@@ -684,7 +684,7 @@ def compute_gammas_softmax(ndoc, ncwo):
     gamma = np.zeros((nv))
     for i in range(ndoc):
         for j in range(ncwo):
-            ig = (ndoc - i - 1) + j * ncwo
+            ig = (ndoc - i - 1) + j * ndoc
             gamma[ig] = np.log(max(0.001 / ncwo, 1e-16)) - np.log(0.999)
     return gamma
 
