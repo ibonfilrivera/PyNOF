@@ -679,6 +679,87 @@ def mp2_eq(eig, pqrt, pqrt_at, nbeta, nalpha, nbf):
     return EcMP2
 
 
+def build_F_MO_spin(C, H, I, b_mnl, p):
+    # Fock alfa y beta de un determinante RO de alto espin (docc + socc alfa)
+    Dd = pynof.computeD_HF(C, p)
+    Jd, Kd = pynof.computeJK_HF(Dd, I, b_mnl, p)
+    Fb = H + 2 * Jd - Kd
+    Fa = Fb
+    if p.nsoc > 0:
+        Ds = pynof.computeDalpha_HF(C, p)
+        Js, Ks = pynof.computeJK_HF(Ds, I, b_mnl, p)
+        Fb = Fb + Js
+        Fa = Fb - Ks
+    Fa_MO = np.matmul(np.matmul(np.transpose(C), Fa), C)
+    Fb_MO = np.matmul(np.matmul(np.transpose(C), Fb), C)
+
+    return Fa_MO, Fb_MO
+
+
+def semicanonical(F_MO_at, nocc):
+    # diagonaliza por separado los bloques ocupado y virtual
+    eo, Uo = eigh(F_MO_at[:nocc, :nocc])
+    ev, Uv = eigh(F_MO_at[nocc:, nocc:])
+
+    return eo, Uo, ev, Uv
+
+
+def mp2_open_shell(C, H, I, b_mnl, pqrt, pqrt_at, Cintra, Cinter, p):
+    # MP2 de espin-orbitales con orbitales semicanonicos alfa/beta (tipo RMP2) sobre
+    # los NOs: ocupados alfa = docc+socc, ocupados beta = docc (el SOMO es virtual beta).
+    # Mismo esquema que mp2_eq: integrales sin atenuar x atenuadas. Simples con el mismo
+    # criterio: f_ia sin atenuar x f_ia atenuado / (e_i - e_a), por espin.
+    # Las dobles en capa cerrada reproducen mp2_eq; con un electron todo da 0.
+    # pqrt y pqrt_at en la base de NOs (antes de canonicalizar).
+    Fa_MO, Fb_MO = build_F_MO_spin(C, H, I, b_mnl, p)
+
+    nocc = {"a": p.nalpha, "b": p.nbeta}
+    eo, Uo, ev, Uv, fov, fov_at = {}, {}, {}, {}, {}, {}
+    for s, F in (("a", Fa_MO), ("b", Fb_MO)):
+        no = nocc[s]
+        # con nalpha = 0 F_MO_attenuated no anula el bloque ocupado-virtual
+        F_at = F_MO_attenuated(F, Cintra, Cinter, p.no1, 0, p.ndoc, p.nsoc, p.ndns, p.ncwo, p.nbf5, p.nbf)
+        eo[s], Uo[s], ev[s], Uv[s] = semicanonical(F_at, no)
+        # bloque ocupado-virtual en la base semicanonica, sin atenuar y atenuado
+        fov[s] = np.matmul(np.matmul(np.transpose(Uo[s]), F[:no, no:]), Uv[s])
+        fov_at[s] = np.matmul(np.matmul(np.transpose(Uo[s]), F_at[:no, no:]), Uv[s])
+
+    def block(eri, s1, s2):
+        n1, n2 = nocc[s1], nocc[s2]
+        return np.einsum(
+            "pqrt,pi,qa,rj,tb->iajb",
+            eri[:n1, n1:, :n2, n2:], Uo[s1], Uv[s1], Uo[s2], Uv[s2], optimize=True,
+        )
+
+    def denom(s1, s2):
+        return (
+            eo[s1][:, None, None, None] - ev[s1][None, :, None, None]
+            + eo[s2][None, None, :, None] - ev[s2][None, None, None, :] + 1e-10
+        )
+
+    Ess = {}
+    for s in ("a", "b"):
+        if nocc[s] == 0:
+            Ess[s] = 0.0
+            continue
+        B = block(pqrt, s, s)
+        A = block(pqrt_at, s, s)
+        Ess[s] = 0.5 * np.sum(B * (A - A.transpose(0, 3, 2, 1)) / denom(s, s))
+
+    Eos = 0.0
+    if p.nbeta > 0:
+        B = block(pqrt, "a", "b")
+        A = block(pqrt_at, "a", "b")
+        Eos = np.sum(B * A / denom("a", "b"))
+
+    Esingles = 0.0
+    for s in ("a", "b"):
+        if nocc[s] > 0:
+            Esingles += np.sum(fov[s] * fov_at[s] / (eo[s][:, None] - ev[s][None, :] + 1e-10))
+
+    return Ess["a"], Ess["b"], Eos, Esingles
+
+
 def ECorrNonDyn(n, C, H, I, b_mnl, p):
     fi = 2 * n * (1 - n)
 
@@ -792,6 +873,11 @@ def mbpt(n, C, H, I, b_mnl, Dipole, E_nuc, E_elec, p):
     print(" ....Attenuating pqrt")
     pqrt_at = ERIS_attenuated(pqrt, Cintra, Cinter, p.no1, p.ndoc, p.nsoc, p.ndns, p.ncwo, p.nbf5, p.nbf)
 
+    # MP2 de espin-orbitales con orbitales semicanonicos alfa/beta (valida en capa abierta)
+    print(" ....Computing spin-orbital mp2")
+    EcMP2_aa, EcMP2_bb, EcMP2_ab, EcMP2_singles = mp2_open_shell(C, H, I, b_mnl, pqrt, pqrt_at, Cintra, Cinter, p)
+    EcMP2_so = EcMP2_aa + EcMP2_bb + EcMP2_ab + EcMP2_singles
+
     # Canonicalization of NOs Step 2 and 3
     eig, C_can = eigh(F_MO_at)
 
@@ -840,7 +926,10 @@ def mbpt(n, C, H, I, b_mnl, Dipole, E_nuc, E_elec, p):
 
     # Eq. (22)
     print(" ....Computing mp2")
-    EcMP2 = mp2_eq(eig, pqrt, pqrt_at, p.nbeta, p.nalpha, p.nbf)
+    EcMP2_cs = mp2_eq(eig, pqrt, pqrt_at, p.nbeta, p.nalpha, p.nbf)
+    # mp2_eq (solo dobles) trata los SOMO con pesos promediados y no se anula para un
+    # electron; Ec(MP2) = dobles de espin-orbitales + simples en capa abierta y cerrada
+    EcMP2 = EcMP2_so
 
     # Eq. (24) and (28)
     order = 40
@@ -878,6 +967,12 @@ def mbpt(n, C, H, I, b_mnl, Dipole, E_nuc, E_elec, p):
     print(" Ec(SOSEX@GM)         = {: f}".format(EcGMSOS))
     print(" Ec(GW@GM+SOSEX@GM)   = {: f}".format(EcGoWoSOS))
     print(" Ec(MP2)              = {: f}".format(EcMP2))
+    print("   spin-orbital MP2: aa = {: f}  bb = {: f}  ab = {: f}  simples = {: f}  total = {: f}".format(
+        EcMP2_aa, EcMP2_bb, EcMP2_ab, EcMP2_singles, EcMP2_so))
+    print("   dobles = {: f}   mp2_eq (solo dobles, SOMO promediados) = {: f}".format(
+        EcMP2_aa + EcMP2_bb + EcMP2_ab, EcMP2_cs))
+    if p.nsoc > 0:
+        print("   AVISO: RPA, GW y SOSEX tratan los SOMO como doblemente ocupados (no validos en capa abierta)")
     print(" Ec(CCSD)             = {: f}".format(EcCCSD))
     print("")
     print(" E(RPA-FURCHE)       = {: f}".format(ESD + EcRPA))
