@@ -689,9 +689,9 @@ def ECorrNonDyn(n, C, H, I, b_mnl, p):
     for l in range(p.ndoc):
         ll = p.no1 + p.ndns + (p.ndoc - l - 1)
         ul = ll + p.ncwo * p.ndoc
-        CK12nd[p.no1 + l, ll:ul:ndoc] = beta[p.no1 + l] * beta[ll:ul:ndoc]
-        CK12nd[ll:ul:ndoc, p.no1 + l] = beta[ll:ul:ndoc] * beta[p.no1 + l]
-        CK12nd[ll:ul:ndoc, ll:ul:ndoc] = -np.outer(beta[ll:ul:ndoc], beta[ll:ul:ndoc])
+        CK12nd[p.no1 + l, ll:ul:p.ndoc] = beta[p.no1 + l] * beta[ll:ul:p.ndoc]
+        CK12nd[ll:ul:p.ndoc, p.no1 + l] = beta[ll:ul:p.ndoc] * beta[p.no1 + l]
+        CK12nd[ll:ul:p.ndoc, ll:ul:p.ndoc] = -np.outer(beta[ll:ul:p.ndoc], beta[ll:ul:p.ndoc])
 
     # C^K KMO
     J_MO, K_MO, H_core = pynof.computeJKH_MO(C, H, I, b_mnl, p)
@@ -989,9 +989,9 @@ def nofmp2(n, C, H, I, b_mnl, E_nuc, p):
     for l in range(p.ndoc):
         ll = p.no1 + p.ndns + (p.ndoc - l - 1)
         ul = ll + p.ncwo * p.ndoc
-        CK12nd[p.no1 + l, ll:ul:ndoc] = beta[p.no1 + l] * beta[ll:ul:ndoc]
-        CK12nd[ll:ul:ndoc, p.no1 + l] = beta[ll:ul:ndoc] * beta[p.no1 + l]
-        CK12nd[ll:ul:ndoc, ll:ul:ndoc] = -np.outer(beta[ll:ul:ndoc], beta[ll:ul:ndoc])
+        CK12nd[p.no1 + l, ll:ul:p.ndoc] = beta[p.no1 + l] * beta[ll:ul:p.ndoc]
+        CK12nd[ll:ul:p.ndoc, p.no1 + l] = beta[ll:ul:p.ndoc] * beta[p.no1 + l]
+        CK12nd[ll:ul:p.ndoc, ll:ul:p.ndoc] = -np.outer(beta[ll:ul:p.ndoc], beta[ll:ul:p.ndoc])
 
     # C^K KMO
     J_MO, K_MO, H_core = pynof.computeJKH_MO(C, H, I, b_mnl, p)
