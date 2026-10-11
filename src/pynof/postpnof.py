@@ -898,31 +898,37 @@ def mbpt(n, C, H, I, b_mnl, Dipole, E_nuc, E_elec, p):
     print("")
 
     # Supp. Info. Eq. (4) and (5)
-    EcRPA, AmB, ApB = build_AmB_ApB(eig, pqrt_at, p.nalpha, p.nbf, nab)
+    # RPA/GW: A+B puede no ser definida positiva (p. ej. capa abierta con SOMO tratados como
+    # doblemente ocupados); en ese caso se marcan como nan y se sigue con MP2
+    try:
+        EcRPA, AmB, ApB = build_AmB_ApB(eig, pqrt_at, p.nalpha, p.nbf, nab)
 
-    L = sp.linalg.cholesky(ApB, lower=True)
+        L = sp.linalg.cholesky(ApB, lower=True)
 
-    bigomega2, tempm = np.linalg.eigh(np.matmul(np.matmul(np.transpose(L), AmB), L))
-    #    bigomega2,tempm = np.linalg.eigh(np.matmul(ApB,AmB))
+        bigomega2, tempm = np.linalg.eigh(np.matmul(np.matmul(np.transpose(L), AmB), L))
+        #    bigomega2,tempm = np.linalg.eigh(np.matmul(ApB,AmB))
 
-    bigomega = np.sqrt(bigomega2)
+        bigomega = np.sqrt(bigomega2)
 
-    XmY, XpY = build_XmY_XpY(L, tempm, bigomega, nab)
+        XmY, XpY = build_XmY_XpY(L, tempm, bigomega, nab)
 
-    # Eq (8) second term
-    print(" ....Computing Polarizabilities")
-    EcRPA = td_polarizability(EcRPA, C, Dipole, bigomega, XpY, nab, p.nalpha, p.nbf)
+        # Eq (8) second term
+        print(" ....Computing Polarizabilities")
+        EcRPA = td_polarizability(EcRPA, C, Dipole, bigomega, XpY, nab, p.nalpha, p.nbf)
 
-    # Supp. Info. Eq. (6)
-    print(" ....Computing wmn")
-    wmn, wmn_at = build_wmn(pqrt, pqrt_at, XpY, nab, p.nalpha, p.nbf)
+        # Supp. Info. Eq. (6)
+        print(" ....Computing wmn")
+        wmn, wmn_at = build_wmn(pqrt, pqrt_at, XpY, nab, p.nalpha, p.nbf)
 
-    # Eq. (27) and (29)
-    print(" ....Computing gw_gm")
-    EcGoWo, EcGMSOS = gw_gm_eq(wmn_at, pqrt, eig, bigomega, XpY, nab, p.nbeta, p.nalpha, p.nbf)
+        # Eq. (27) and (29)
+        print(" ....Computing gw_gm")
+        EcGoWo, EcGMSOS = gw_gm_eq(wmn_at, pqrt, eig, bigomega, XpY, nab, p.nbeta, p.nalpha, p.nbf)
 
-    EcGoWo *= 2
-    EcGoWoSOS = EcGoWo + EcGMSOS
+        EcGoWo *= 2
+        EcGoWoSOS = EcGoWo + EcGMSOS
+    except np.linalg.LinAlgError as err:
+        print("   AVISO: RPA/GW omitidos, A+B no es definida positiva ({})".format(err))
+        EcRPA = EcGoWo = EcGMSOS = EcGoWoSOS = np.nan
 
     # Eq. (22)
     print(" ....Computing mp2")
