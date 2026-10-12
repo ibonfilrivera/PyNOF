@@ -75,6 +75,7 @@ class param:
         self.maxloop = 30  # Iteraciones internas en optimización orbital
         self.ipnof = 8  # PNOFi a calcular
         self.ista = 0  # PNOFi a calcular
+        self.imod = 0  # ipnof=8: 0 = GNOF, 1 = GNOFm (PRL 134, 206401 (2025); DoNOF Imod)
         # SOLUCION 3: anchura del "agujero dinamico" de GNOF (ipnof=8).
         #   F(n) = exp(-((1-n_strong)/gnof_hcut)^2)  activa la correccion
         #   dinamica n_d solo cerca de capa cerrada.  Valor original

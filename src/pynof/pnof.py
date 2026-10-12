@@ -348,8 +348,12 @@ def der_CJCKD7(n, ista, dn_dgamma, no1, ndoc, nalpha, nbeta, nv, nbf5, ndns, ncw
 
 # CJCKD8
 @njit(parallel=True, cache=True)
-def CJCKD8(n, no1, ndoc, nsoc, nbeta, nalpha, ndns, ncwo, MSpin, h_cut):
+def CJCKD8(n, no1, ndoc, nsoc, nbeta, nalpha, ndns, ncwo, MSpin, h_cut, imod=0):
     """GNOF coefficients C^J and C^K that multiply J and K integrals.
+
+    imod=1: GNOFm (Lew-Yee, del Campo y Piris, PRL 134, 206401 (2025), SI ec. 20; DoNOF Imod=1):
+    la parte estatica interpar es -sum'_{pq} Phi_p Phi_q K_pq sobre todos los pares de subespacios
+    distintos (anade fuerte-fuerte y pasa fuerte-SOMO de 1/2 a 1). Dinamica e intrapar como GNOF.
 
     h_cut: anchura del agujero dinamico (SOLUCION 3, antes fija a
     0.02*sqrt(2)).  Ver parameters.py:gnof_hcut."""
@@ -382,21 +386,25 @@ def CJCKD8(n, no1, ndoc, nsoc, nbeta, nalpha, ndns, ncwo, MSpin, h_cut):
     cj12 = 2 * np.outer(n, n)
     ck12 = np.outer(n, n)
 
-    ck12[no1:nbeta, nalpha:] += np.outer(fi[no1:nbeta], fi[nalpha:])
-    ck12[nalpha:, no1:nbeta] += np.outer(fi[nalpha:], fi[no1:nbeta])
-    ck12[nalpha:, nalpha:] += np.outer(fi[nalpha:], fi[nalpha:])
+    if imod == 1:
+        # GNOFm: CK_pq = n_p n_q + Phi_p Phi_q para todo p, q (Phi = 0 en el core y 1/2 en los SOMO)
+        ck12 += np.outer(fi, fi)
+    else:
+        ck12[no1:nbeta, nalpha:] += np.outer(fi[no1:nbeta], fi[nalpha:])
+        ck12[nalpha:, no1:nbeta] += np.outer(fi[nalpha:], fi[no1:nbeta])
+        ck12[nalpha:, nalpha:] += np.outer(fi[nalpha:], fi[nalpha:])
 
-    # Intrapair Electron Correlation
+        # Intrapair Electron Correlation
 
-    if MSpin == 0 and nsoc > 0:
-        half = np.zeros((nsoc)) + 0.5
-        ck12[no1:nbeta, nbeta:nalpha] += 0.5 * np.outer(fi[no1:nbeta], half)
-        ck12[nbeta:nalpha, no1:nbeta] += 0.5 * np.outer(half, fi[no1:nbeta])
-        ck12[nbeta:nalpha, nalpha:] += np.outer(half, fi[nalpha:])
-        ck12[nalpha:, nbeta:nalpha] += np.outer(fi[nalpha:], half)
+        if MSpin == 0 and nsoc > 0:
+            half = np.zeros((nsoc)) + 0.5
+            ck12[no1:nbeta, nbeta:nalpha] += 0.5 * np.outer(fi[no1:nbeta], half)
+            ck12[nbeta:nalpha, no1:nbeta] += 0.5 * np.outer(half, fi[no1:nbeta])
+            ck12[nbeta:nalpha, nalpha:] += np.outer(half, fi[nalpha:])
+            ck12[nalpha:, nbeta:nalpha] += np.outer(fi[nalpha:], half)
 
-    if MSpin == 0 and nsoc > 1:  # then
-        ck12[nbeta:nalpha, nbeta:nalpha] = 0.5
+        if MSpin == 0 and nsoc > 1:  # then
+            ck12[nbeta:nalpha, nbeta:nalpha] = 0.5
 
     ck12[no1:nbeta, nalpha:] += np.outer(n_d12[no1:nbeta], n_d12[nalpha:]) - np.outer(n_d[no1:nbeta], n_d[nalpha:])
     ck12[nalpha:, no1:nbeta] += np.outer(n_d12[nalpha:], n_d12[no1:nbeta]) - np.outer(n_d[nalpha:], n_d[no1:nbeta])
@@ -425,7 +433,7 @@ def CJCKD8(n, no1, ndoc, nsoc, nbeta, nalpha, ndns, ncwo, MSpin, h_cut):
 
 
 @njit(parallel=True, cache=True)
-def der_CJCKD8(n, dn_dgamma, no1, ndoc, nalpha, nbeta, nv, nbf5, ndns, ncwo, MSpin, nsoc, h_cut):
+def der_CJCKD8(n, dn_dgamma, no1, ndoc, nalpha, nbeta, nv, nbf5, ndns, ncwo, MSpin, nsoc, h_cut, imod=0):
 
     n_d = np.zeros((len(n)))
     dn_d_dgamma = np.zeros((len(n), nv))
@@ -473,18 +481,23 @@ def der_CJCKD8(n, dn_dgamma, no1, ndoc, nalpha, nbeta, nv, nbf5, ndns, ncwo, MSp
         Dcj12r[:, :, k] = 2 * np.outer(dn_dgamma[:, k], n)
         Dck12r[:, :, k] = np.outer(dn_dgamma[:, k], n)
 
-    for i in prange(nalpha, nbf5):
-        Dck12r[no1:nbeta, i, :] += dfi_dgamma[no1:nbeta, :] * fi[i]
-        Dck12r[i, no1:nbeta, :] += np.outer(fi[no1:nbeta], dfi_dgamma[i, :])
-        Dck12r[i, nalpha:nbf5, :] += np.outer(fi[nalpha:nbf5], dfi_dgamma[i, :])
+    if imod == 1:
+        # GNOFm: d(Phi_p Phi_q)/dgamma con p la fila derivada (convencion de Dck12r[p, q, k])
+        for k in prange(nv):
+            Dck12r[:, :, k] += np.outer(dfi_dgamma[:, k], fi)
+    else:
+        for i in prange(nalpha, nbf5):
+            Dck12r[no1:nbeta, i, :] += dfi_dgamma[no1:nbeta, :] * fi[i]
+            Dck12r[i, no1:nbeta, :] += np.outer(fi[no1:nbeta], dfi_dgamma[i, :])
+            Dck12r[i, nalpha:nbf5, :] += np.outer(fi[nalpha:nbf5], dfi_dgamma[i, :])
 
-    if MSpin == 0 and nsoc > 0:
-        for i in prange(nbeta, nalpha):
-            Dck12r[no1:nbeta, i, :] += 0.5 * dfi_dgamma[no1:nbeta, :] * 0.5
-            Dck12r[nalpha:nbf5, i, :] += dfi_dgamma[nalpha:nbf5, :] * 0.5
+        if MSpin == 0 and nsoc > 0:
+            for i in prange(nbeta, nalpha):
+                Dck12r[no1:nbeta, i, :] += 0.5 * dfi_dgamma[no1:nbeta, :] * 0.5
+                Dck12r[nalpha:nbf5, i, :] += dfi_dgamma[nalpha:nbf5, :] * 0.5
 
-    if MSpin == 0 and nsoc > 1:
-        Dck12r[nbeta:nalpha, nbeta:nalpha, :] = 0.0
+        if MSpin == 0 and nsoc > 1:
+            Dck12r[nbeta:nalpha, nbeta:nalpha, :] = 0.0
 
     for i in prange(nalpha, nbf5):
         Dck12r[no1:nbeta, i, :] += dn_d12_dgamma[no1:nbeta, :] * n_d12[i] - dn_d_dgamma[no1:nbeta, :] * n_d[i]
@@ -592,7 +605,7 @@ def compute_2RDM(pp, n):
 
         Dab -= np.einsum("pq,pt,qr->pqrt", inter2, Id, Id, optimize=True)
 
-        if pp.ipnof == 8:
+        if pp.ipnof == 8 and getattr(pp, "imod", 0) != 1:   # GNOFm conserva fuerte-fuerte y fuerte-SOMO completos
             Pi_s[: pp.nbeta, : pp.nbeta] = 0
             Pi_s[: pp.nbeta, pp.nbeta : pp.nalpha] *= 0.5
             Pi_s[pp.nbeta : pp.nalpha, : pp.nbeta] *= 0.5
@@ -664,7 +677,7 @@ def PNOFi_selector(n, p):
         cj12, ck12 = CJCKD7(n, p.ista, p.no1, p.ndoc, p.nsoc, p.nbeta, p.nalpha, p.ndns, p.ncwo, p.MSpin)
     if p.ipnof == 8:
         cj12, ck12 = CJCKD8(n, p.no1, p.ndoc, p.nsoc, p.nbeta, p.nalpha, p.ndns, p.ncwo, p.MSpin,
-                            getattr(p, "gnof_hcut", 0.02 * np.sqrt(2.0)))
+                            getattr(p, "gnof_hcut", 0.02 * np.sqrt(2.0)), getattr(p, "imod", 0))
 
     return cj12, ck12
 
@@ -685,7 +698,7 @@ def der_PNOFi_selector(n, dn_dgamma, p):
     if p.ipnof == 8:
         Dcj12r, Dck12r = der_CJCKD8(
             n, dn_dgamma, p.no1, p.ndoc, p.nalpha, p.nbeta, p.nv, p.nbf5, p.ndns, p.ncwo, p.MSpin, p.nsoc,
-            getattr(p, "gnof_hcut", 0.02 * np.sqrt(2.0))
+            getattr(p, "gnof_hcut", 0.02 * np.sqrt(2.0)), getattr(p, "imod", 0)
         )
 
     return Dcj12r, Dck12r
