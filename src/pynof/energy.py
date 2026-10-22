@@ -91,6 +91,7 @@ def compute_energy(
     ekt=False,
     mulliken_pop=False,
     lowdin_pop=False,
+    dipole=False,
     m_diagnostic=False,
     perturb=False,
     erpa=False,
@@ -378,6 +379,9 @@ def compute_energy(
 
     if lowdin_pop:
         pynof.lowdin_pop(p, wfn, n, C, S)
+
+    if dipole:
+        pynof.dipole_moment(p, wfn, n, C, Dipole)
 
     if m_diagnostic:
         pynof.M_diagnostic(p, n)

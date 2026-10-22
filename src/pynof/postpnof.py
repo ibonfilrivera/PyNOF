@@ -5,6 +5,7 @@ from scipy.sparse import csr_matrix
 from scipy.optimize import root
 from time import time
 import pynof
+import psi4
 from numba import prange, njit, jit
 from scipy.sparse.linalg import spsolve
 from scipy.sparse.linalg import cg, minres
@@ -1399,9 +1400,19 @@ def ext_koopmans(p, elag, n):
     print("")
 
 
+def occ_1rdm(p, n):
+    """Occupations of the spin-summed 1RDM: 2n, except singly occupied orbitals with HighSpin (n = 1)"""
+
+    occ = 2 * np.asarray(n)[: p.nbf5]
+    if p.HighSpin:
+        occ[p.no1 + p.ndoc : p.no1 + p.ndns] = n[p.no1 + p.ndoc : p.no1 + p.ndns]
+
+    return occ
+
+
 def mulliken_pop(p, wfn, n, C, S):
 
-    nPS = 2 * np.einsum("i,mi,ni,nm->m", n, C[:, : p.nbf5], C[:, : p.nbf5], S, optimize=True)
+    nPS = np.einsum("i,mi,ni,nm->m", occ_1rdm(p, n), C[:, : p.nbf5], C[:, : p.nbf5], S, optimize=True)
 
     pop = np.zeros((p.natoms))
 
@@ -1424,12 +1435,14 @@ def mulliken_pop(p, wfn, n, C, S):
         )
     print("")
 
+    return pop, np.array([wfn.molecule().Z(iatom) for iatom in range(p.natoms)]) - pop
+
 
 def lowdin_pop(p, wfn, n, C, S):
 
     S_12 = fractional_matrix_power(S, 0.5)
 
-    S_12nPS_12 = 2 * np.einsum("sm,i,mi,ni,ns->s", S_12, n, C[:, : p.nbf5], C[:, : p.nbf5], S_12, optimize=True)
+    S_12nPS_12 = np.einsum("sm,i,mi,ni,ns->s", S_12, occ_1rdm(p, n), C[:, : p.nbf5], C[:, : p.nbf5], S_12, optimize=True)
 
     pop = np.zeros((p.natoms))
 
@@ -1451,6 +1464,31 @@ def lowdin_pop(p, wfn, n, C, S):
             )
         )
     print("")
+
+    return pop, np.array([wfn.molecule().Z(iatom) for iatom in range(p.natoms)]) - pop
+
+
+def dipole_moment(p, wfn, n, C, Dipole):
+    """Dipole moment (a.u.) of the NOF 1RDM: nuclear part plus trace of D with the AO dipole
+    integrals (psi4 ao_dipole already includes the electron charge)"""
+
+    D = np.einsum("i,mi,ni->mn", occ_1rdm(p, n), C[:, : p.nbf5], C[:, : p.nbf5], optimize=True)
+    mu_el = np.einsum("qmn,mn->q", Dipole, D, optimize=True)
+    mol = wfn.molecule()
+    mu_nuc = np.einsum("a,aq->q", [mol.Z(a) for a in range(mol.natom())], mol.geometry().np)
+    mu = mu_nuc + mu_el
+
+    au2debye = psi4.constants.dipmom_au2debye
+    print("")
+    print("---------------------------------")
+    print("         Dipole Moment           ")
+    print("---------------------------------")
+    print("        X        Y        Z      Total")
+    print(" a.u. {: 8.4f} {: 8.4f} {: 8.4f} {: 8.4f}".format(*mu, np.linalg.norm(mu)))
+    print(" D    {: 8.4f} {: 8.4f} {: 8.4f} {: 8.4f}".format(*(mu * au2debye), np.linalg.norm(mu) * au2debye))
+    print("")
+
+    return mu
 
 
 def M_diagnostic(p, n):
